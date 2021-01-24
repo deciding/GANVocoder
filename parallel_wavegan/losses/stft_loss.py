@@ -39,6 +39,93 @@ def stft(x, fft_size, hop_size, win_length, window):
     # NOTE(kan-bayashi): clamp is needed to avoid nan or inf
     return torch.sqrt(torch.clamp(real ** 2 + imag ** 2, min=1e-7)).transpose(2, 1)
 
+def complex_stft(x, fft_size, hop_size, win_length, window):
+    """Perform STFT and convert to magnitude spectrogram.
+    Args:
+        x (Tensor): Input signal tensor (B, T).
+        fft_size (int): FFT size.
+        hop_size (int): Hop size.
+        win_length (int): Window length.
+        window (str): Window function type.
+    Returns:
+        Tensor: Magnitude spectrogram (B, #frames, fft_size // 2 + 1).
+    """
+    if is_pytorch_17plus:
+        x_stft = torch.stft(
+            x, fft_size, hop_size, win_length, window
+        )
+    else:
+        x_stft = torch.stft(x, fft_size, hop_size, win_length, window, return_complex=True)
+    real = x_stft[..., 0]
+    imag = x_stft[..., 1]
+
+    return real.transpose(2, 1), imag.transpose(2, 1)
+
+class MagPhaseLoss(torch.nn.Module):
+    """Spectral convergence loss module."""
+
+    def __init__(self):
+        """Initilize spectral convergence loss module."""
+        super(MagPhaseLoss, self).__init__()
+
+    def forward(self, x_real, x_imag, y_real, y_imag, x_mag=None, y_mag=None):
+        """Calculate forward propagation.
+        Args:
+            x_mag (Tensor): Magnitude spectrogram of predicted signal (B, #frames, #freq_bins).
+            y_mag (Tensor): Magnitude spectrogram of groundtruth signal (B, #frames, #freq_bins).
+        Returns:
+            Tensor: Spectral convergence loss value.
+        """
+        if x_mag is None:
+            x_mag = torch.sqrt(torch.clamp(x_real ** 2 + x_imag ** 2, min=1e-7))
+        if y_mag is None:
+            y_mag = torch.sqrt(torch.clamp(y_real ** 2 + y_imag ** 2, min=1e-7))
+
+        return torch.mean( (x_mag - y_mag) ** 2 + 2 * (x_mag * y_mag - x_real * y_real - x_imag * y_imag) )
+
+class WeightedPhaseLoss(torch.nn.Module):
+    """Spectral convergence loss module."""
+
+    def __init__(self):
+        """Initilize spectral convergence loss module."""
+        super(WeightedPhaseLoss, self).__init__()
+
+    def forward(self, x_real, x_imag, y_real, y_imag, x_mag=None, y_mag=None):
+        """Calculate forward propagation.
+        Args:
+            x_mag (Tensor): Magnitude spectrogram of predicted signal (B, #frames, #freq_bins).
+            y_mag (Tensor): Magnitude spectrogram of groundtruth signal (B, #frames, #freq_bins).
+        Returns:
+            Tensor: Spectral convergence loss value.
+        """
+        if x_mag is None:
+            x_mag = torch.sqrt(torch.clamp(x_real ** 2 + x_imag ** 2, min=1e-7))
+        if y_mag is None:
+            y_mag = torch.sqrt(torch.clamp(y_real ** 2 + y_imag ** 2, min=1e-7))
+
+        return torch.mean( (x_mag * y_mag - x_real * y_real - x_imag * y_imag) )
+
+class PhaseLoss(torch.nn.Module):
+    """Spectral convergence loss module."""
+
+    def __init__(self):
+        """Initilize spectral convergence loss module."""
+        super(PhaseLoss, self).__init__()
+
+    def forward(self, x_real, x_imag, y_real, y_imag, x_mag=None, y_mag=None):
+        """Calculate forward propagation.
+        Args:
+            x_mag (Tensor): Magnitude spectrogram of predicted signal (B, #frames, #freq_bins).
+            y_mag (Tensor): Magnitude spectrogram of groundtruth signal (B, #frames, #freq_bins).
+        Returns:
+            Tensor: Spectral convergence loss value.
+        """
+        if x_mag is None:
+            x_mag = torch.sqrt(torch.clamp(x_real ** 2 + x_imag ** 2, min=1e-7))
+        if y_mag is None:
+            y_mag = torch.sqrt(torch.clamp(y_real ** 2 + y_imag ** 2, min=1e-7))
+
+        return torch.mean( 1 - (x_real * y_real + x_imag * y_imag) / (x_mag * y_mag + 1e-7) )
 
 class SpectralConvergenceLoss(torch.nn.Module):
     """Spectral convergence loss module."""
@@ -117,6 +204,55 @@ class STFTLoss(torch.nn.Module):
 
         return sc_loss, mag_loss
 
+class PhaseSTFTLoss(torch.nn.Module):
+    """STFT loss module."""
+
+    def __init__(self, fft_size=1024, shift_size=120, win_length=600, window="hann_window", queries=['sc', 'mag']):
+        """Initialize STFT loss module."""
+        super(PhaseSTFTLoss, self).__init__()
+        self.fft_size = fft_size
+        self.shift_size = shift_size
+        self.win_length = win_length
+        self.window = getattr(torch, window)(win_length)
+        self.spectral_convergence_loss = SpectralConvergenceLoss()
+        self.log_stft_magnitude_loss = LogSTFTMagnitudeLoss()
+        self.mag_phase_loss = MagPhaseLoss()
+        self.weighted_phase_loss = WeightedPhaseLoss()
+        self.phase_loss = PhaseLoss()
+        self.queries = queries
+
+    def forward(self, x, y):
+        """Calculate forward propagation.
+        Args:
+            x (Tensor): Predicted signal (B, T).
+            y (Tensor): Groundtruth signal (B, T).
+        Returns:
+            Tensor: Spectral convergence loss value.
+            Tensor: Log STFT magnitude loss value.
+        """
+        x_real, x_imag = complex_stft(x, self.fft_size, self.shift_size, self.win_length, self.window.to(device=x.device))
+        y_real, y_imag = complex_stft(y, self.fft_size, self.shift_size, self.win_length, self.window.to(device=x.device))
+        x_mag = torch.sqrt(torch.clamp(x_real ** 2 + x_imag ** 2, min=1e-7))
+        y_mag = torch.sqrt(torch.clamp(y_real ** 2 + y_imag ** 2, min=1e-7))
+
+        res_map={}
+        if 'sc' in self.queries:
+            sc_loss = self.spectral_convergence_loss(x_mag, y_mag)
+            res_map['sc']=sc_loss
+        if 'mag' in self.queries:
+            mag_loss = self.log_stft_magnitude_loss(x_mag, y_mag)
+            res_map['mag']=mag_loss
+        if 'mp' in self.queries:
+            mp_loss = self.mag_phase_loss(x_real, x_imag, y_real, y_imag, x_mag, y_mag)
+            res_map['mp']=mp_loss
+        if 'wp' in self.queries:
+            wp_loss = self.weighted_phase_loss(x_real, x_imag, y_real, y_imag, x_mag, y_mag)
+            res_map['wp']=wp_loss
+        if 'ph' in self.queries:
+            ph_loss = self.phase_loss(x_real, x_imag, y_real, y_imag, x_mag, y_mag)
+            res_map['ph']=ph_loss
+
+        return res_map
 
 class MultiResolutionSTFTLoss(torch.nn.Module):
     """Multi resolution STFT loss module."""
@@ -165,3 +301,45 @@ class MultiResolutionSTFTLoss(torch.nn.Module):
         mag_loss /= len(self.stft_losses)
 
         return sc_loss, mag_loss
+
+class MultiResolutionSTFTLoss2(torch.nn.Module):
+    """Multi resolution STFT loss module."""
+
+    def __init__(self,
+                 fft_sizes=[1024, 2048, 512],
+                 hop_sizes=[120, 240, 50],
+                 win_lengths=[600, 1200, 240],
+                 window="hann_window",
+                 queries=['sc', 'mag', 'ph']):
+        """Initialize Multi resolution STFT loss module.
+        Args:
+            fft_sizes (list): List of FFT sizes.
+            hop_sizes (list): List of hop sizes.
+            win_lengths (list): List of window lengths.
+            window (str): Window function type.
+        """
+        super(MultiResolutionSTFTLoss2, self).__init__()
+        assert len(fft_sizes) == len(hop_sizes) == len(win_lengths)
+        self.stft_losses = torch.nn.ModuleList()
+        self.queries = queries
+        for fs, ss, wl in zip(fft_sizes, hop_sizes, win_lengths):
+            self.stft_losses += [PhaseSTFTLoss(fs, ss, wl, window, queries)]
+
+    def forward(self, x, y):
+        """Calculate forward propagation.
+        Args:
+            x (Tensor): Predicted signal (B, T).
+            y (Tensor): Groundtruth signal (B, T).
+        Returns:
+            Tensor: Multi resolution spectral convergence loss value.
+            Tensor: Multi resolution log STFT magnitude loss value.
+        """
+        res_map={k:0.0 for k in self.queries}
+        for f in self.stft_losses:
+            sub_res_map = f(x, y)
+            for k in sub_res_map:
+                res_map[k]+=sub_res_map[k]
+        for k in res_map:
+            res_map[k] /= len(self.stft_losses)
+
+        return res_map

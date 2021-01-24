@@ -7,33 +7,43 @@
 . ./path.sh || exit 1;
 
 # basic settings
-stage=2       # stage to start
-stop_stage=2 # stage to stop
+stage=3       # stage to start
+stop_stage=3 # stage to stop
 verbose=1      # verbosity level (lower is less info)
 n_gpus=1       # number of gpus in training
 n_jobs=16      # number of parallel jobs in feature extraction
 
+#TODO
 # NOTE(kan-bayashi): renamed to conf to avoid conflict in parse_options.sh
 #conf=conf/parallel_wavegan.v1.yaml
-conf=conf/ms_melgan.v1.yaml
+conf=conf/multi_band_melgan.v2.yaml
+#conf=conf/ms_melgan.v1.yaml
 
 # speaker setting
 spks="all" # all or you can choose speakers e.g., "p225 p226 p227 ..."
 
 # directory path setting
 download_dir=downloads # directory to save database
-dumpdir=dump           # directory to dump features
+#TODO
+#data_dir=data
+#dumpdir=dump           # directory to dump features
+data_dir=data1
+dumpdir=dump1           # directory to dump features
 
+#TODO
 # training related setting
 tag=""     # tag for directory to save model
-tag="ms_melgan_v1"     # tag for directory to save model
+#tag="ms_melgan_v1"     # tag for directory to save model
 resume=""  # checkpoint path to resume training
            # (e.g. <path>/<to>/checkpoint-10000steps.pkl)
 
 # decoding related setting
+#TODO
 checkpoint="" # checkpoint path to be used for decoding
               # if not provided, the latest one will be used
               # (e.g. <path>/<to>/checkpoint-400000steps.pkl)
+checkpoint="exp/train_nodev_all_vctk_multi_band_melgan.v2/checkpoint-1000000steps.pkl"
+#checkpoint="exp/train_nodev_all_vctk_ms_melgan_v1/checkpoint-600000steps.pkl"
 
 # shellcheck disable=SC1091
 . utils/parse_options.sh || exit 1;
@@ -66,17 +76,17 @@ if [ "${stage}" -le 0 ] && [ "${stop_stage}" -ge 0 ]; then
             --train_set "train_nodev_${spk}" \
             --dev_set "dev_${spk}" \
             --eval_set "eval_${spk}" \
-            "${download_dir}/VCTK-Corpus" "${spk}" data
-        train_data_dirs+=" data/train_nodev_${spk}"
-        dev_data_dirs+=" data/dev_${spk}"
-        eval_data_dirs+=" data/eval_${spk}"
+            "${download_dir}/VCTK-Corpus" "${spk}" ${data_dir}
+        train_data_dirs+=" ${data_dir}/train_nodev_${spk}"
+        dev_data_dirs+=" ${data_dir}/dev_${spk}"
+        eval_data_dirs+=" ${data_dir}/eval_${spk}"
     done
     # shellcheck disable=SC2086
-    utils/combine_data.sh "data/${train_set}" ${train_data_dirs}
+    utils/combine_data.sh "${data_dir}/${train_set}" ${train_data_dirs}
     # shellcheck disable=SC2086
-    utils/combine_data.sh "data/${dev_set}" ${dev_data_dirs}
+    utils/combine_data.sh "${data_dir}/${dev_set}" ${dev_data_dirs}
     # shellcheck disable=SC2086
-    utils/combine_data.sh "data/${eval_set}" ${eval_data_dirs}
+    utils/combine_data.sh "${data_dir}/${eval_set}" ${eval_data_dirs}
 fi
 
 stats_ext=$(grep -q "hdf5" <(yq ".format" "${conf}") && echo "h5" || echo "npy")
@@ -95,7 +105,7 @@ if [ "${stage}" -le 1 ] && [ "${stop_stage}" -ge 1 ]; then
     (
         [ ! -e "${dumpdir}/${name}/raw" ] && mkdir -p "${dumpdir}/${name}/raw"
         echo "Feature extraction start. See the progress via ${dumpdir}/${name}/raw/preprocessing.*.log."
-        utils/make_subset_data.sh "data/${name}" "${n_jobs}" "${dumpdir}/${name}/raw"
+        utils/make_subset_data.sh "${data_dir}/${name}" "${n_jobs}" "${dumpdir}/${name}/raw"
         ${train_cmd} JOB=1:${n_jobs} "${dumpdir}/${name}/raw/preprocessing.JOB.log" \
             parallel-wavegan-preprocess \
                 --config "${conf}" \
@@ -175,7 +185,9 @@ if [ "${stage}" -le 3 ] && [ "${stop_stage}" -ge 3 ]; then
     [ -z "${checkpoint}" ] && checkpoint="$(ls -dt "${expdir}"/*.pkl | head -1 || true)"
     outdir="${expdir}/wav/$(basename "${checkpoint}" .pkl)"
     pids=()
-    for name in "${dev_set}" "${eval_set}"; do
+    #TODO
+    #for name in "${dev_set}" "${eval_set}"; do
+    for name in "${train_set}" "${dev_set}" "${eval_set}"; do
     (
         [ ! -e "${outdir}/${name}" ] && mkdir -p "${outdir}/${name}"
         [ "${n_gpus}" -gt 1 ] && n_gpus=1

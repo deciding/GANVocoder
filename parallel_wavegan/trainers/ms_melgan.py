@@ -67,6 +67,7 @@ class MSMelGANTrainer(Trainer):
         self.finish_train = False
         self.total_train_loss = defaultdict(float)
         self.total_eval_loss = defaultdict(float)
+        self.name_map={'sc': 'spectral_convergence', 'mag': 'log_stft_magnitude', 'mp': 'magnitude_phase', 'wp': 'weighted_phase', 'ph': 'phase'}
 
     def run(self):
         """Run training."""
@@ -163,10 +164,15 @@ class MSMelGANTrainer(Trainer):
             y_ = self.criterion["pqmf"].synthesis(y_mb_)
 
         # multi-resolution sfft loss
-        sc_loss, mag_loss = self.criterion["stft"](y_.squeeze(1), y.squeeze(1))
-        self.total_train_loss["train/spectral_convergence_loss"] += sc_loss.item()
-        self.total_train_loss["train/log_stft_magnitude_loss"] += mag_loss.item()
-        gen_loss = sc_loss + mag_loss
+        #sc_loss, mag_loss = self.criterion["stft"](y_.squeeze(1), y.squeeze(1))
+        #self.total_train_loss["train/spectral_convergence_loss"] += sc_loss.item()
+        #self.total_train_loss["train/log_stft_magnitude_loss"] += mag_loss.item()
+        #gen_loss = sc_loss + mag_loss
+        res_map = self.criterion["stft"](y_.squeeze(1), y.squeeze(1))
+        gen_loss = 0.0
+        for k, l in res_map.items():
+            self.total_train_loss[f"train/{self.name_map[k]}_loss"] += l.item()
+            gen_loss += l
 
         # subband multi-resolution stft loss
         if self.config.get("use_subband_stft_loss", False):
@@ -174,12 +180,16 @@ class MSMelGANTrainer(Trainer):
             y_mb = self.criterion["pqmf"].analysis(y)
             y_mb = y_mb.view(-1, y_mb.size(2))  # (B, C, T) -> (B x C, T)
             y_mb_ = y_mb_.view(-1, y_mb_.size(2))  # (B, C, T) -> (B x C, T)
-            sub_sc_loss, sub_mag_loss = self.criterion["sub_stft"](y_mb_, y_mb)
-            self.total_train_loss[
-                "train/sub_spectral_convergence_loss"] += sub_sc_loss.item()
-            self.total_train_loss[
-                "train/sub_log_stft_magnitude_loss"] += sub_mag_loss.item()
-            gen_loss += 0.5 * (sub_sc_loss + sub_mag_loss)
+            #sub_sc_loss, sub_mag_loss = self.criterion["sub_stft"](y_mb_, y_mb)
+            #self.total_train_loss[
+            #    "train/sub_spectral_convergence_loss"] += sub_sc_loss.item()
+            #self.total_train_loss[
+            #    "train/sub_log_stft_magnitude_loss"] += sub_mag_loss.item()
+            #gen_loss += 0.5 * (sub_sc_loss + sub_mag_loss)
+            sub_res_map = self.criterion["sub_stft"](y_mb_, y_mb)
+            for k, l in sub_res_map.items():
+                self.total_train_loss[f"train/sub_{self.name_map[k]}_loss"] += l.item()
+                gen_loss += 0.5 * l
 
         # adversarial loss
         if self.steps > self.config["discriminator_train_start_steps"]:
@@ -319,8 +329,13 @@ class MSMelGANTrainer(Trainer):
             y_ = self.criterion["pqmf"].synthesis(y_mb_)
 
         # multi-resolution stft loss
-        sc_loss, mag_loss = self.criterion["stft"](y_.squeeze(1), y.squeeze(1))
-        aux_loss = sc_loss + mag_loss
+        #sc_loss, mag_loss = self.criterion["stft"](y_.squeeze(1), y.squeeze(1))
+        #aux_loss = sc_loss + mag_loss
+        res_map = self.criterion["stft"](y_.squeeze(1), y.squeeze(1))
+        aux_loss = 0.0
+        for k, l in res_map.items():
+            self.total_eval_loss[f"eval/{self.name_map[k]}_loss"] += l.item()
+            aux_loss += l
 
         # subband multi-resolution stft loss
         if self.config.get("use_subband_stft_loss", False):
@@ -328,12 +343,16 @@ class MSMelGANTrainer(Trainer):
             y_mb = self.criterion["pqmf"].analysis(y)
             y_mb = y_mb.view(-1, y_mb.size(2))  # (B, C, T) -> (B x C, T)
             y_mb_ = y_mb_.view(-1, y_mb_.size(2))  # (B, C, T) -> (B x C, T)
-            sub_sc_loss, sub_mag_loss = self.criterion["sub_stft"](y_mb_, y_mb)
-            self.total_eval_loss[
-                "eval/sub_spectral_convergence_loss"] += sub_sc_loss.item()
-            self.total_eval_loss[
-                "eval/sub_log_stft_magnitude_loss"] += sub_mag_loss.item()
-            aux_loss += 0.5 * (sub_sc_loss + sub_mag_loss)
+            #sub_sc_loss, sub_mag_loss = self.criterion["sub_stft"](y_mb_, y_mb)
+            #self.total_eval_loss[
+            #    "eval/sub_spectral_convergence_loss"] += sub_sc_loss.item()
+            #self.total_eval_loss[
+            #    "eval/sub_log_stft_magnitude_loss"] += sub_mag_loss.item()
+            #aux_loss += 0.5 * (sub_sc_loss + sub_mag_loss)
+            sub_res_map = self.criterion["sub_stft"](y_mb_, y_mb)
+            for k, l in sub_res_map.items():
+                self.total_eval_loss[f"eval/sub_{self.name_map[k]}_loss"] += l.item()
+                aux_loss += 0.5 * l
 
         # adversarial loss
         p_ = self.model["discriminator"](y_, spk_ids)
@@ -388,8 +407,8 @@ class MSMelGANTrainer(Trainer):
 
         # add to total eval loss
         self.total_eval_loss["eval/adversarial_loss"] += adv_loss.item()
-        self.total_eval_loss["eval/spectral_convergence_loss"] += sc_loss.item()
-        self.total_eval_loss["eval/log_stft_magnitude_loss"] += mag_loss.item()
+        #self.total_eval_loss["eval/spectral_convergence_loss"] += sc_loss.item()
+        #self.total_eval_loss["eval/log_stft_magnitude_loss"] += mag_loss.item()
         self.total_eval_loss["eval/generator_loss"] += gen_loss.item()
         self.total_eval_loss["eval/real_loss"] += real_loss.item()
         self.total_eval_loss["eval/fake_loss"] += fake_loss.item()
