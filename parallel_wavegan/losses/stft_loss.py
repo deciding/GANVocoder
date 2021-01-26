@@ -7,6 +7,7 @@
 
 import torch
 import torch.nn.functional as F
+import librosa
 
 from distutils.version import LooseVersion
 
@@ -168,6 +169,33 @@ class LogSTFTMagnitudeLoss(torch.nn.Module):
         """
         return F.l1_loss(torch.log(y_mag), torch.log(x_mag))
 
+def build_mel_basis(n_fft, sr=24000, n_mels=80):
+    return torch.FloatTensor(librosa.filters.mel(sr, n_fft, n_mels=n_mels)).transpose(0, 1)
+
+class LogMelLoss(torch.nn.Module):
+    """Log STFT magnitude loss module."""
+
+    def __init__(self, fft_size, sr=24000, n_mels=80):
+        """Initilize los STFT magnitude loss module."""
+        super(LogSTFTMagnitudeLoss, self).__init__()
+        self.register_buffer('mel_basis', build_mel_basis(fft_size, sr, n_mels))
+
+    def forward(self, x_mag, y_mag):
+        """Calculate forward propagation.
+
+        Args:
+            x_mag (Tensor): Magnitude spectrogram of predicted signal (B, #frames, #freq_bins).
+            y_mag (Tensor): Magnitude spectrogram of groundtruth signal (B, #frames, #freq_bins).
+
+        Returns:
+            Tensor: Log STFT magnitude loss value.
+
+        """
+        x_mel = torch.matmul(x_mag, self.mel_basis.to(device=x_mag.device))
+        y_mel = torch.matmul(y_mag, self.mel_basis.to(device=y_mag.device))
+        x_logmel = torch.log(torch.clamp(x_mel, min=1e-5))
+        y_logmel = torch.log(torch.clamp(y_mel, min=1e-5))
+        return F.l1_loss(x_logmel, y_logmel)
 
 class STFTLoss(torch.nn.Module):
     """STFT loss module."""
@@ -219,7 +247,9 @@ class PhaseSTFTLoss(torch.nn.Module):
         self.mag_phase_loss = MagPhaseLoss()
         self.weighted_phase_loss = WeightedPhaseLoss()
         self.phase_loss = PhaseLoss()
+        self.log_mel_loss = LogMelLoss(fft_size)
         self.queries = queries
+
 
     def forward(self, x, y):
         """Calculate forward propagation.
@@ -251,6 +281,9 @@ class PhaseSTFTLoss(torch.nn.Module):
         if 'ph' in self.queries:
             ph_loss = self.phase_loss(x_real, x_imag, y_real, y_imag, x_mag, y_mag)
             res_map['ph']=ph_loss
+        if 'mel' in self.queries:
+            mel_loss = self.log_mel_loss(x_mag, y_mag)
+            res_map['mel']=mel_loss
 
         return res_map
 
@@ -310,7 +343,7 @@ class MultiResolutionSTFTLoss2(torch.nn.Module):
                  hop_sizes=[120, 240, 50],
                  win_lengths=[600, 1200, 240],
                  window="hann_window",
-                 queries=['sc', 'mag', 'ph']):
+                 queries=['sc', 'mag', 'mel']):
         """Initialize Multi resolution STFT loss module.
         Args:
             fft_sizes (list): List of FFT sizes.

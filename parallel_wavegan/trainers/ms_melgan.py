@@ -67,7 +67,7 @@ class MSMelGANTrainer(Trainer):
         self.finish_train = False
         self.total_train_loss = defaultdict(float)
         self.total_eval_loss = defaultdict(float)
-        self.name_map={'sc': 'spectral_convergence', 'mag': 'log_stft_magnitude', 'mp': 'magnitude_phase', 'wp': 'weighted_phase', 'ph': 'phase'}
+        self.name_map={'sc': 'spectral_convergence', 'mag': 'log_stft_magnitude', 'mp': 'magnitude_phase', 'wp': 'weighted_phase', 'ph': 'phase', 'mel': 'log_mel'}
 
     def run(self):
         """Run training."""

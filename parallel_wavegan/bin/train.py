@@ -31,8 +31,10 @@ import parallel_wavegan.trainers
 from parallel_wavegan.datasets import AudioMelDataset
 from parallel_wavegan.datasets import AudioMelSCPDataset
 from parallel_wavegan.layers import PQMF
-from parallel_wavegan.losses import MultiResolutionSTFTLoss
 from parallel_wavegan.utils import read_hdf5
+
+#from parallel_wavegan.losses import MultiResolutionSTFTLoss
+from parallel_wavegan.losses import MultiResolutionSTFTLoss2
 
 # set to avoid matplotlib error in CLI environment
 matplotlib.use("Agg")
@@ -850,7 +852,8 @@ def main():
             **config["discriminator_params"]).to(device),
     }
     criterion = {
-        "stft": MultiResolutionSTFTLoss(
+        #"stft": MultiResolutionSTFTLoss(
+        "stft": MultiResolutionSTFTLoss2(
             **config["stft_loss_params"]).to(device),
         "mse": torch.nn.MSELoss().to(device),
     }
@@ -864,7 +867,8 @@ def main():
         ).to(device)
     if config.get("use_subband_stft_loss", False):  # keep compatibility
         assert config["generator_params"]["out_channels"] > 1
-        criterion["sub_stft"] = MultiResolutionSTFTLoss(
+        #criterion["sub_stft"] = MultiResolutionSTFTLoss(
+        criterion["sub_stft"] = MultiResolutionSTFTLoss2(
             **config["subband_stft_loss_params"]).to(device)
     generator_optimizer_class = getattr(
         parallel_wavegan.optimizers,
