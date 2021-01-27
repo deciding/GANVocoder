@@ -141,6 +141,7 @@ class Trainer(object):
             self.scheduler["discriminator"].load_state_dict(state_dict["scheduler"]["discriminator"])
 
     def _train_step(self, batch):
+        #import pdb;pdb.set_trace()
         """Train model one step."""
         # parse batch
         #import pdb;pdb.set_trace()
@@ -511,6 +512,7 @@ class Collater(object):
                  hop_size=256,
                  aux_context_window=2,
                  use_noise_input=False,
+                 return_spk_id=False,
                  ):
         """Initialize customized collater for PyTorch DataLoader.
 

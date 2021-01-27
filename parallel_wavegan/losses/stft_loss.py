@@ -177,7 +177,7 @@ class LogMelLoss(torch.nn.Module):
 
     def __init__(self, fft_size, sr=24000, n_mels=80):
         """Initilize los STFT magnitude loss module."""
-        super(LogSTFTMagnitudeLoss, self).__init__()
+        super(LogMelLoss, self).__init__()
         self.register_buffer('mel_basis', build_mel_basis(fft_size, sr, n_mels))
 
     def forward(self, x_mag, y_mag):
