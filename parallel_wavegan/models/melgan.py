@@ -9,13 +9,14 @@ import logging
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from parallel_wavegan.layers import CausalConv1d
 from parallel_wavegan.layers import CausalConvTranspose1d
 from parallel_wavegan.layers import ResidualStack
 from parallel_wavegan.layers import ResidualSEStack
 
-class MelGANAdvancedGenerator(torch.nn.Module):
+class MelGANSEGenerator(torch.nn.Module):
     """MelGAN generator module."""
 
     def __init__(self,
@@ -56,7 +57,7 @@ class MelGANAdvancedGenerator(torch.nn.Module):
             use_causal_conv (bool): Whether to use causal convolution.
 
         """
-        super(MelGANAdvancedGenerator, self).__init__()
+        super(MelGANSEGenerator, self).__init__()
 
         # check hyper parameters is valid
         assert channels >= np.prod(upsample_scales)
@@ -515,6 +516,149 @@ class MelGANDiscriminator(torch.nn.Module):
 
         return outs
 
+class MelGANPeriodDiscriminator(torch.nn.Module):
+    """MelGAN discriminator module."""
+
+    def __init__(self,
+                 period,
+                 in_channels=1,
+                 out_channels=1,
+                 kernel_sizes=[5, 3],
+                 channels=16,
+                 max_downsample_channels=1024,
+                 bias=True,
+                 downsample_scales=[4, 4, 4, 4],
+                 nonlinear_activation="LeakyReLU",
+                 nonlinear_activation_params={"negative_slope": 0.2},
+                 pad="ReflectionPad2d",
+                 pad_params={},
+                 fixed_kernel_size=False,
+                 num_channels=None,
+                 num_groups=None,
+                 use_cond=False,
+                 dim_spk=0,
+                 ):
+        """Initilize MelGAN discriminator module.
+
+        Args:
+            in_channels (int): Number of input channels.
+            out_channels (int): Number of output channels.
+            kernel_sizes (list): List of two kernel sizes. The prod will be used for the first conv layer,
+                and the first and the second kernel sizes will be used for the last two layers.
+                For example if kernel_sizes = [5, 3], the first layer kernel size will be 5 * 3 = 15,
+                the last two layers' kernel size will be 5 and 3, respectively.
+            channels (int): Initial number of channels for conv layer.
+            max_downsample_channels (int): Maximum number of channels for downsampling layers.
+            bias (bool): Whether to add bias parameter in convolution layers.
+            downsample_scales (list): List of downsampling scales.
+            nonlinear_activation (str): Activation function module name.
+            nonlinear_activation_params (dict): Hyperparameters for activation function.
+            pad (str): Padding function module name before dilated convolution layer.
+            pad_params (dict): Hyperparameters for padding function.
+
+        """
+        super(MelGANPeriodDiscriminator, self).__init__()
+        self.period = period
+        self.layers = torch.nn.ModuleList()
+        self.use_cond = use_cond
+        if not use_cond:
+            dim_spk = 0
+        self.dim_spk = dim_spk
+
+        # check kernel size is valid
+        assert len(kernel_sizes) == 2
+        assert kernel_sizes[0] % 2 == 1
+        assert kernel_sizes[1] % 2 == 1
+        if num_channels is not None:
+            assert len(downsample_scales)==len(num_channels)
+        if num_groups is not None:
+            assert len(downsample_scales)==len(num_groups)
+
+        # add first layer
+        # TODO: hifigan doesn't have the conv_in
+        self.layers += [
+            torch.nn.Sequential(
+                getattr(torch.nn, pad)((0, 0, (np.prod(kernel_sizes) - 1) // 2, (np.prod(kernel_sizes) - 1) // 2), **pad_params),
+                torch.nn.Conv2d(in_channels, channels, (np.prod(kernel_sizes), 1), bias=bias),
+                getattr(torch.nn, nonlinear_activation)(**nonlinear_activation_params),
+            )
+        ]
+
+        # add downsample layers
+        in_chs = channels
+        self.start_downsample=len(self.layers)
+        self.end_downsample=self.start_downsample+len(downsample_scales)
+        for i, downsample_scale in enumerate(downsample_scales):
+            out_chs = min(in_chs * downsample_scale, max_downsample_channels) if num_channels is None else num_channels[i]
+            group = in_chs // 4 if num_groups is None else num_groups[i]
+            group = 1 if fixed_kernel_size else group
+            kk = 5 if fixed_kernel_size else downsample_scale * 10 + 1
+            ss = 3 if fixed_kernel_size else downsample_scale
+            pp = 2 if fixed_kernel_size else downsample_scale * 5
+            self.layers += [
+                torch.nn.Sequential(
+                    torch.nn.Conv2d(
+                        in_chs + dim_spk, out_chs,
+                        kernel_size=(kk, 1),
+                        stride=(ss, 1),
+                        padding=(pp, 0),
+                        groups=group,
+                        bias=bias,
+                    ),
+                    getattr(torch.nn, nonlinear_activation)(**nonlinear_activation_params),
+                )
+            ]
+            in_chs = out_chs
+
+        # add final layers
+        #out_chs = min(in_chs * 2, max_downsample_channels)
+        self.layers += [
+            torch.nn.Sequential(
+                torch.nn.Conv2d(
+                    in_chs, out_chs, (kernel_sizes[0], 1),
+                    padding=((kernel_sizes[0] - 1) // 2, 0),
+                    bias=bias,
+                ),
+                getattr(torch.nn, nonlinear_activation)(**nonlinear_activation_params),
+            )
+        ]
+        self.layers += [
+            torch.nn.Conv2d(
+                out_chs, out_channels, (kernel_sizes[1], 1),
+                padding=((kernel_sizes[1] - 1) // 2, 0),
+                bias=bias,
+            ),
+        ]
+
+    def forward(self, x, c=None):
+        """Calculate forward propagation.
+
+        Args:
+            x (Tensor): Input noise signal (B, 1, T).
+            c (Tensor): Input condition (B, C, 1, 1).
+
+        Returns:
+            List: List of output tensors of each layer.
+
+        """
+        assert (c is None)!=self.use_cond
+        assert c.shape[1]==self.dim_spk
+        b, ch, t = x.shape
+        if t % self.period != 0: # pad first
+            n_pad = self.period - (t % self.period)
+            x = F.pad(x, (0, n_pad), "reflect")
+            t = t + n_pad
+        x = x.view(b, ch, t // self.period, self.period)
+        outs = []
+        for i, f in enumerate(self.layers):
+            if self.use_cond and i>=self.start_downsample and i<self.end_downsample:
+                x = torch.cat([x, c.repeat(1, 1, x.size(2), x.size(3))], dim=1)
+            x = f(x)
+            out = torch.flatten(x, 1, -1)
+            outs += [out]
+
+        return outs
+
 class MelGANCondDiscriminator(torch.nn.Module):
     """MelGAN discriminator module."""
 
@@ -530,7 +674,10 @@ class MelGANCondDiscriminator(torch.nn.Module):
                  nonlinear_activation_params={"negative_slope": 0.2},
                  pad="ReflectionPad1d",
                  pad_params={},
-                 num_spk=104,
+                 num_channels=None,
+                 num_groups=None,
+                 use_cond=False,
+                 #num_spk=104,
                  dim_spk=32,
                  ):
         """Initilize MelGAN discriminator module.
@@ -554,26 +701,35 @@ class MelGANCondDiscriminator(torch.nn.Module):
         """
         super(MelGANCondDiscriminator, self).__init__()
         self.layers = torch.nn.ModuleList()
+        self.use_cond = use_cond
+        if not use_cond:
+            dim_spk = 0
+        self.dim_spk = dim_spk
 
         # check kernel size is valid
         assert len(kernel_sizes) == 2
         assert kernel_sizes[0] % 2 == 1
         assert kernel_sizes[1] % 2 == 1
 
-        self.spk_embedding=torch.nn.Embedding(num_spk, dim_spk)
+        ##TODO:delete
+        #if use_cond:
+        #    self.spk_embedding=torch.nn.Embedding(num_spk, dim_spk)
         # add first layer
         self.layers += [
             torch.nn.Sequential(
                 getattr(torch.nn, pad)((np.prod(kernel_sizes) - 1) // 2, **pad_params),
-                torch.nn.Conv1d(in_channels + dim_spk, channels, np.prod(kernel_sizes), bias=bias),
+                torch.nn.Conv1d(in_channels, channels, np.prod(kernel_sizes), bias=bias),
                 getattr(torch.nn, nonlinear_activation)(**nonlinear_activation_params),
             )
         ]
 
         # add downsample layers
         in_chs = channels
-        for downsample_scale in downsample_scales:
-            out_chs = min(in_chs * downsample_scale, max_downsample_channels)
+        self.start_downsample=len(self.layers)
+        self.end_downsample=self.start_downsample+len(downsample_scales)
+        for i, downsample_scale in enumerate(downsample_scales):
+            out_chs = min(in_chs * downsample_scale, max_downsample_channels) if num_channels is None else num_channels[i]
+            group = in_chs // 4 if num_groups is None else num_groups[i]
             self.layers += [
                 torch.nn.Sequential(
                     torch.nn.Conv1d(
@@ -581,7 +737,7 @@ class MelGANCondDiscriminator(torch.nn.Module):
                         kernel_size=downsample_scale * 10 + 1,
                         stride=downsample_scale,
                         padding=downsample_scale * 5,
-                        groups=in_chs // 4,
+                        groups=group,
                         bias=bias,
                     ),
                     getattr(torch.nn, nonlinear_activation)(**nonlinear_activation_params),
@@ -590,11 +746,11 @@ class MelGANCondDiscriminator(torch.nn.Module):
             in_chs = out_chs
 
         # add final layers
-        out_chs = min(in_chs * 2, max_downsample_channels)
+        #out_chs = min(in_chs * 2, max_downsample_channels)
         self.layers += [
             torch.nn.Sequential(
                 torch.nn.Conv1d(
-                    in_chs + dim_spk, out_chs, kernel_sizes[0],
+                    in_chs, out_chs, kernel_sizes[0],
                     padding=(kernel_sizes[0] - 1) // 2,
                     bias=bias,
                 ),
@@ -603,26 +759,32 @@ class MelGANCondDiscriminator(torch.nn.Module):
         ]
         self.layers += [
             torch.nn.Conv1d(
-                out_chs + dim_spk, out_channels, kernel_sizes[1],
+                out_chs, out_channels, kernel_sizes[1],
                 padding=(kernel_sizes[1] - 1) // 2,
                 bias=bias,
             ),
         ]
 
-    def forward(self, x, spk_idx):
+    def forward(self, x, c=None):
         """Calculate forward propagation.
 
         Args:
             x (Tensor): Input noise signal (B, 1, T).
+            c (Tensor): Input condition (B, C, 1).
 
         Returns:
             List: List of output tensors of each layer.
 
         """
+        assert (c is None)!=self.use_cond
+        assert c.shape[1]==self.dim_spk
         outs = []
-        spk_emd = self.spk_embedding(spk_idx).unsqueeze(2) # B, N, 1
-        for f in self.layers:
-            x = torch.cat([x, spk_emd.repeat(1, 1, x.size(2))], dim=1)
+        ##TODO:delete
+        #if self.use_cond:
+        #    spk_emd = self.spk_embedding(spk_idx).unsqueeze(2) # B, N, 1
+        for i, f in enumerate(self.layers):
+            if self.use_cond and i>=self.start_downsample and i<self.end_downsample:
+                x = torch.cat([x, c.repeat(1, 1, x.size(2))], dim=1)
             x = f(x)
             outs += [x]
 
@@ -780,6 +942,9 @@ class MelGANMultiScaleCondDiscriminator(torch.nn.Module):
                  pad="ReflectionPad1d",
                  pad_params={},
                  use_weight_norm=True,
+                 num_channels=None,
+                 num_groups=None,
+                 use_cond=False,
                  num_spk=104,
                  dim_spk=32,
                  ):
@@ -805,6 +970,8 @@ class MelGANMultiScaleCondDiscriminator(torch.nn.Module):
         """
         super(MelGANMultiScaleCondDiscriminator, self).__init__()
         self.discriminators = torch.nn.ModuleList()
+        self.use_cond = use_cond
+        self.num_spk = num_spk
 
         # add discriminators
         for _ in range(scales):
@@ -821,11 +988,162 @@ class MelGANMultiScaleCondDiscriminator(torch.nn.Module):
                     nonlinear_activation_params=nonlinear_activation_params,
                     pad=pad,
                     pad_params=pad_params,
-                    num_spk=num_spk,
+                    num_channels=num_channels,
+                    num_groups=num_groups,
+                    use_cond=use_cond,
+                    #num_spk=num_spk,
                     dim_spk=dim_spk,
                 )
             ]
         self.pooling = getattr(torch.nn, downsample_pooling)(**downsample_pooling_params)
+        #TODO:fix
+        if use_cond:
+            self.spk_embedding=torch.nn.Embedding(num_spk, dim_spk)
+
+        # apply weight norm
+        if use_weight_norm:
+            self.apply_weight_norm()
+
+        # reset parameters
+        self.reset_parameters()
+
+    def forward(self, x, spk_idx=None):
+        """Calculate forward propagation.
+
+        Args:
+            x (Tensor): Input noise signal (B, 1, T).
+            spk_idx (Tensor): Input speaker one-hot label (B, C).
+
+        Returns:
+            List: List of list of each discriminator outputs, which consists of each layer output tensors.
+
+        """
+        assert (spk_idx is None)!=self.use_cond
+        #assert spk_idx.shape[1]==self.num_spk
+        outs = []
+        #TODO:fix
+        if self.use_cond:
+            spk_emd = self.spk_embedding(spk_idx).unsqueeze(2) # B, N, 1
+        for f in self.discriminators:
+            if self.use_cond:
+                outs += [f(x, spk_emd)]
+            else:
+                outs += [f(x)]
+            #outs += [f(x, spk_idx)]
+            x = self.pooling(x)
+
+        return outs
+
+    def remove_weight_norm(self):
+        """Remove weight normalization module from all of the layers."""
+        def _remove_weight_norm(m):
+            try:
+                logging.debug(f"Weight norm is removed from {m}.")
+                torch.nn.utils.remove_weight_norm(m)
+            except ValueError:  # this module didn't have weight norm
+                return
+
+        self.apply(_remove_weight_norm)
+
+    def apply_weight_norm(self):
+        """Apply weight normalization module from all of the layers."""
+        def _apply_weight_norm(m):
+            if isinstance(m, torch.nn.Conv1d) or isinstance(m, torch.nn.ConvTranspose1d):
+                torch.nn.utils.weight_norm(m)
+                logging.debug(f"Weight norm is applied to {m}.")
+
+        self.apply(_apply_weight_norm)
+
+    def reset_parameters(self):
+        """Reset parameters.
+
+        This initialization follows official implementation manner.
+        https://github.com/descriptinc/melgan-neurips/blob/master/mel2wav/modules.py
+
+        """
+        def _reset_parameters(m):
+            if isinstance(m, torch.nn.Conv1d) or isinstance(m, torch.nn.ConvTranspose1d):
+                m.weight.data.normal_(0.0, 0.02)
+                logging.debug(f"Reset parameters in {m}.")
+
+        self.apply(_reset_parameters)
+
+class MelGANMultiPeriodCondDiscriminator(torch.nn.Module):
+    """MelGAN multi-scale discriminator module."""
+
+    def __init__(self,
+                 in_channels=1,
+                 out_channels=1,
+                 scales=3,
+                 kernel_sizes=[5, 3],
+                 channels=16,
+                 max_downsample_channels=1024,
+                 bias=True,
+                 downsample_scales=[4, 4, 4, 4],
+                 nonlinear_activation="LeakyReLU",
+                 nonlinear_activation_params={"negative_slope": 0.2},
+                 pad="ReflectionPad2d",
+                 pad_params={},
+                 use_weight_norm=True,
+                 num_channels=None,
+                 num_groups=None,
+                 use_cond=False,
+                 num_spk=104,
+                 dim_spk=32,
+                 fixed_kernel_size=True,
+                 periods=[2, 3, 5, 7, 11],
+                 ):
+        """Initilize MelGAN multi-scale discriminator module.
+
+        Args:
+            in_channels (int): Number of input channels.
+            out_channels (int): Number of output channels.
+            downsample_pooling (str): Pooling module name for downsampling of the inputs.
+            downsample_pooling_params (dict): Parameters for the above pooling module.
+            kernel_sizes (list): List of two kernel sizes. The sum will be used for the first conv layer,
+                and the first and the second kernel sizes will be used for the last two layers.
+            channels (int): Initial number of channels for conv layer.
+            max_downsample_channels (int): Maximum number of channels for downsampling layers.
+            bias (bool): Whether to add bias parameter in convolution layers.
+            downsample_scales (list): List of downsampling scales.
+            nonlinear_activation (str): Activation function module name.
+            nonlinear_activation_params (dict): Hyperparameters for activation function.
+            pad (str): Padding function module name before dilated convolution layer.
+            pad_params (dict): Hyperparameters for padding function.
+            use_causal_conv (bool): Whether to use causal convolution.
+
+        """
+        super(MelGANMultiPeriodCondDiscriminator, self).__init__()
+        self.discriminators = torch.nn.ModuleList()
+        self.use_cond = use_cond
+        self.num_spk = num_spk
+
+        # add discriminators
+        for period in periods:
+            self.discriminators += [
+                MelGANPeriodDiscriminator(
+                    period=period,
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_sizes=kernel_sizes,
+                    channels=channels,
+                    max_downsample_channels=max_downsample_channels,
+                    bias=bias,
+                    downsample_scales=downsample_scales,
+                    nonlinear_activation=nonlinear_activation,
+                    nonlinear_activation_params=nonlinear_activation_params,
+                    pad=pad,
+                    pad_params=pad_params,
+                    fixed_kernel_size=fixed_kernel_size,
+                    num_channels=num_channels,
+                    num_groups=num_groups,
+                    use_cond=use_cond,
+                    dim_spk=dim_spk,
+                )
+            ]
+        #TODO:fix
+        if use_cond:
+            self.spk_embedding=torch.nn.Embedding(num_spk, dim_spk)
 
         # apply weight norm
         if use_weight_norm:
@@ -844,10 +1162,17 @@ class MelGANMultiScaleCondDiscriminator(torch.nn.Module):
             List: List of list of each discriminator outputs, which consists of each layer output tensors.
 
         """
+        assert (spk_idx is None)!=self.use_cond
+        #assert spk_idx.shape[1]==self.num_spk
         outs = []
+        #TODO:fix
+        if self.use_cond:
+            spk_emd = self.spk_embedding(spk_idx).unsqueeze(2).unsqueeze(3) # B, N, 1
         for f in self.discriminators:
-            outs += [f(x, spk_idx)]
-            x = self.pooling(x)
+            if self.use_cond:
+                outs += [f(x, spk_emd)]
+            else:
+                outs += [f(x)]
 
         return outs
 

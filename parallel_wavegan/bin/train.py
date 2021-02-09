@@ -845,12 +845,20 @@ def main():
         # keep compatibility
         config.get("discriminator_type", "ParallelWaveGANDiscriminator"),
     )
+    if config.get("use_2nd_D"):
+        discriminator_class2 = getattr(
+            parallel_wavegan.models,
+            # keep compatibility
+            config.get("discriminator_type2", "MelGANMultiPeriodCondDiscriminator"),
+        )
     model = {
         "generator": generator_class(
             **config["generator_params"]).to(device),
         "discriminator": discriminator_class(
             **config["discriminator_params"]).to(device),
     }
+    model["discriminator2"] = discriminator_class2(
+            **config["discriminator_params2"]).to(device)
     criterion = {
         #"stft": MultiResolutionSTFTLoss(
         "stft": MultiResolutionSTFTLoss2(
@@ -880,13 +888,14 @@ def main():
         # keep compatibility
         config.get("discriminator_optimizer_type", "RAdam"),
     )
+    import itertools
     optimizer = {
         "generator": generator_optimizer_class(
             model["generator"].parameters(),
             **config["generator_optimizer_params"],
         ),
         "discriminator": discriminator_optimizer_class(
-            model["discriminator"].parameters(),
+            model["discriminator"].parameters() if not config.get('use_2nd_D') else itertools.chain(model['discriminator'].parameters(), model['discriminator2'].parameters()),
             **config["discriminator_optimizer_params"],
         ),
     }
@@ -918,8 +927,13 @@ def main():
             raise ImportError("apex is not installed. please check https://github.com/NVIDIA/apex.")
         model["generator"] = DistributedDataParallel(model["generator"])
         model["discriminator"] = DistributedDataParallel(model["discriminator"])
+        if config.get('use_2nd_D'):
+            model["discriminator2"] = DistributedDataParallel(model["discriminator2"])
+
     logging.info(model["generator"])
     logging.info(model["discriminator"])
+    if config.get('use_2nd_D'):
+        logging.info(model["discriminator2"])
 
     # define trainer
     # TODO: test

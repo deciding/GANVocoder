@@ -109,11 +109,15 @@ class MSMelGANTrainer(Trainer):
                 "generator": self.model["generator"].module.state_dict(),
                 "discriminator": self.model["discriminator"].module.state_dict(),
             }
+            if self.config.get('use_2nd_D'):
+                state_dict["model"]["discriminator2"] = self.model["discriminator2"].module.state_dict()
         else:
             state_dict["model"] = {
                 "generator": self.model["generator"].state_dict(),
                 "discriminator": self.model["discriminator"].state_dict(),
             }
+            if self.config.get('use_2nd_D'):
+                state_dict["model"]["discriminator2"] = self.model["discriminator2"].state_dict()
 
         if not os.path.exists(os.path.dirname(checkpoint_path)):
             os.makedirs(os.path.dirname(checkpoint_path))
@@ -131,9 +135,15 @@ class MSMelGANTrainer(Trainer):
         if self.config["distributed"]:
             self.model["generator"].module.load_state_dict(state_dict["model"]["generator"])
             self.model["discriminator"].module.load_state_dict(state_dict["model"]["discriminator"])
+            #TODO:fix
+            if self.config.get('use_2nd_D'):
+                self.model["discriminator2"].module.load_state_dict(state_dict["model"]["discriminator2"])
         else:
             self.model["generator"].load_state_dict(state_dict["model"]["generator"])
             self.model["discriminator"].load_state_dict(state_dict["model"]["discriminator"])
+            #TODO:fix
+            if self.config.get('use_2nd_D'):
+                self.model["discriminator2"].load_state_dict(state_dict["model"]["discriminator2"])
         if not load_only_params:
             self.steps = state_dict["steps"]
             self.epochs = state_dict["epochs"]
@@ -219,9 +229,38 @@ class MSMelGANTrainer(Trainer):
                     fm_loss /= (i + 1) * (j + 1)
                     self.total_train_loss["train/feature_matching_loss"] += fm_loss.item()
                     adv_loss += self.config["lambda_feat_match"] * fm_loss
+            if self.config.get('use_2nd_D'):
+                p_ = self.model["discriminator2"](y_, spk_ids)
+                if not isinstance(p_, list):
+                    # for standard discriminator
+                    adv_loss2 = self.criterion["mse"](p_, p_.new_ones(p_.size()))
+                    self.total_train_loss["train/adversarial_loss2"] += adv_loss2.item()
+                else:
+                    # for multi-scale discriminator
+                    adv_loss2 = 0.0
+                    for i in range(len(p_)):
+                        adv_loss2 += self.criterion["mse"](
+                            p_[i][-1], p_[i][-1].new_ones(p_[i][-1].size()))
+                    adv_loss2 /= (i + 1)
+                    self.total_train_loss["train/adversarial_loss2"] += adv_loss2.item()
+
+                    # feature matching loss
+                    if self.config["use_feat_match_loss"]:
+                        # no need to track gradients
+                        with torch.no_grad():
+                            p = self.model["discriminator2"](y, spk_ids)
+                        fm_loss2 = 0.0
+                        for i in range(len(p_)):
+                            for j in range(len(p_[i]) - 1):
+                                fm_loss2 += self.criterion["l1"](p_[i][j], p[i][j].detach())
+                        fm_loss2 /= (i + 1) * (j + 1)
+                        self.total_train_loss["train/feature_matching_loss2"] += fm_loss2.item()
+                        adv_loss2 += self.config["lambda_feat_match"] * fm_loss2
 
             # add adversarial loss to generator loss
             gen_loss += self.config["lambda_adv"] * adv_loss
+            if self.config.get('use_2nd_D'):
+                gen_loss += self.config["lambda_adv"] * adv_loss2
 
         self.total_train_loss["train/generator_loss"] += gen_loss.item()
 
@@ -240,10 +279,11 @@ class MSMelGANTrainer(Trainer):
         #######################
         if self.steps > self.config["discriminator_train_start_steps"]:
             # re-compute y_ which leads better quality
-            with torch.no_grad():
-                y_ = self.model["generator"](*x)
-            if self.config["generator_params"]["out_channels"] > 1:
-                y_ = self.criterion["pqmf"].synthesis(y_)
+            if self.config.get("regenerate_fake"):
+                with torch.no_grad():
+                    y_ = self.model["generator"](*x)
+                if self.config["generator_params"]["out_channels"] > 1:
+                    y_ = self.criterion["pqmf"].synthesis(y_)
 
             # discriminator loss
             p = self.model["discriminator"](y, spk_ids)
@@ -269,6 +309,34 @@ class MSMelGANTrainer(Trainer):
             self.total_train_loss["train/real_loss"] += real_loss.item()
             self.total_train_loss["train/fake_loss"] += fake_loss.item()
             self.total_train_loss["train/discriminator_loss"] += dis_loss.item()
+
+            # discriminator loss 2
+            if self.config.get('use_2nd_D'):
+                p = self.model["discriminator2"](y, spk_ids)
+                p_ = self.model["discriminator2"](y_.detach(), spk_ids)
+                if not isinstance(p, list):
+                    # for standard discriminator
+                    real_loss2 = self.criterion["mse"](p, p.new_ones(p.size()))
+                    fake_loss2 = self.criterion["mse"](p_, p_.new_zeros(p_.size()))
+                    dis_loss2 = real_loss2 + fake_loss2
+                else:
+                    # for multi-scale discriminator
+                    real_loss2 = 0.0
+                    fake_loss2 = 0.0
+                    for i in range(len(p)):
+                        real_loss2 += self.criterion["mse"](
+                            p[i][-1], p[i][-1].new_ones(p[i][-1].size()))
+                        fake_loss2 += self.criterion["mse"](
+                            p_[i][-1], p_[i][-1].new_zeros(p_[i][-1].size()))
+                    real_loss2 /= (i + 1)
+                    fake_loss2 /= (i + 1)
+                    dis_loss2 = real_loss2 + fake_loss2
+
+                self.total_train_loss["train/real_loss2"] += real_loss2.item()
+                self.total_train_loss["train/fake_loss2"] += fake_loss2.item()
+                self.total_train_loss["train/discriminator_loss2"] += dis_loss2.item()
+
+                dis_loss += dis_loss2
 
             # update discriminator
             self.optimizer["discriminator"].zero_grad()
@@ -332,14 +400,17 @@ class MSMelGANTrainer(Trainer):
         #sc_loss, mag_loss = self.criterion["stft"](y_.squeeze(1), y.squeeze(1))
         #aux_loss = sc_loss + mag_loss
         res_map = self.criterion["stft"](y_.squeeze(1), y.squeeze(1))
-        aux_loss = 0.0
+        #aux_loss = 0.0
+        gen_loss = 0.0
         for k, l in res_map.items():
             self.total_eval_loss[f"eval/{self.name_map[k]}_loss"] += l.item()
-            aux_loss += l
+            #aux_loss += l
+            gen_loss += l
 
         # subband multi-resolution stft loss
         if self.config.get("use_subband_stft_loss", False):
-            aux_loss *= 0.5  # for balancing with subband stft loss
+            #aux_loss *= 0.5  # for balancing with subband stft loss
+            gen_loss *= 0.5  # for balancing with subband stft loss
             y_mb = self.criterion["pqmf"].analysis(y)
             y_mb = y_mb.view(-1, y_mb.size(2))  # (B, C, T) -> (B x C, T)
             y_mb_ = y_mb_.view(-1, y_mb_.size(2))  # (B, C, T) -> (B x C, T)
@@ -352,14 +423,15 @@ class MSMelGANTrainer(Trainer):
             sub_res_map = self.criterion["sub_stft"](y_mb_, y_mb)
             for k, l in sub_res_map.items():
                 self.total_eval_loss[f"eval/sub_{self.name_map[k]}_loss"] += l.item()
-                aux_loss += 0.5 * l
+                #aux_loss += 0.5 * l
+                gen_loss += 0.5 * l
 
         # adversarial loss
         p_ = self.model["discriminator"](y_, spk_ids)
         if not isinstance(p_, list):
             # for standard discriminator
             adv_loss = self.criterion["mse"](p_, p_.new_ones(p_.size()))
-            gen_loss = aux_loss + self.config["lambda_adv"] * adv_loss
+            #gen_loss = aux_loss + self.config["lambda_adv"] * adv_loss
         else:
             # for multi-scale discriminator
             adv_loss = 0.0
@@ -367,7 +439,7 @@ class MSMelGANTrainer(Trainer):
                 adv_loss += self.criterion["mse"](
                     p_[i][-1], p_[i][-1].new_ones(p_[i][-1].size()))
             adv_loss /= (i + 1)
-            gen_loss = aux_loss + self.config["lambda_adv"] * adv_loss
+            #gen_loss = aux_loss + self.config["lambda_adv"] * adv_loss
 
             # feature matching loss
             if self.config["use_feat_match_loss"]:
@@ -378,7 +450,37 @@ class MSMelGANTrainer(Trainer):
                         fm_loss += self.criterion["l1"](p_[i][j], p[i][j])
                 fm_loss /= (i + 1) * (j + 1)
                 self.total_eval_loss["eval/feature_matching_loss"] += fm_loss.item()
-                gen_loss += self.config["lambda_adv"] * self.config["lambda_feat_match"] * fm_loss
+                #gen_loss += self.config["lambda_adv"] * self.config["lambda_feat_match"] * fm_loss
+                adv_loss += self.config["lambda_feat_match"] * fm_loss
+
+        if self.config.get('use_2nd_D'):
+            p_ = self.model["discriminator2"](y_, spk_ids)
+            if not isinstance(p_, list):
+                # for standard discriminator
+                adv_loss2 = self.criterion["mse"](p_, p_.new_ones(p_.size()))
+            else:
+                # for multi-scale discriminator
+                adv_loss2 = 0.0
+                for i in range(len(p_)):
+                    adv_loss2 += self.criterion["mse"](
+                        p_[i][-1], p_[i][-1].new_ones(p_[i][-1].size()))
+                adv_loss2 /= (i + 1)
+
+                # feature matching loss
+                if self.config["use_feat_match_loss"]:
+                    # no need to track gradients
+                    with torch.no_grad():
+                        p = self.model["discriminator2"](y, spk_ids)
+                    fm_loss2 = 0.0
+                    for i in range(len(p_)):
+                        for j in range(len(p_[i]) - 1):
+                            fm_loss2 += self.criterion["l1"](p_[i][j], p[i][j].detach())
+                    fm_loss2 /= (i + 1) * (j + 1)
+                    adv_loss2 += self.config["lambda_feat_match"] * fm_loss2
+
+        gen_loss += self.config["lambda_adv"] * adv_loss
+        if self.config.get('use_2nd_D'):
+            gen_loss += self.config["lambda_adv"] * adv_loss2
 
         #######################
         #    Discriminator    #
@@ -405,6 +507,28 @@ class MSMelGANTrainer(Trainer):
             fake_loss /= (i + 1)
             dis_loss = real_loss + fake_loss
 
+        # discriminator loss 2
+        if self.config.get('use_2nd_D'):
+            p = self.model["discriminator2"](y, spk_ids)
+            p_ = self.model["discriminator2"](y_, spk_ids)
+            if not isinstance(p, list):
+                # for standard discriminator
+                real_loss2 = self.criterion["mse"](p, p.new_ones(p.size()))
+                fake_loss2 = self.criterion["mse"](p_, p_.new_zeros(p_.size()))
+                dis_loss2 = real_loss2 + fake_loss2
+            else:
+                # for multi-scale discriminator
+                real_loss2 = 0.0
+                fake_loss2 = 0.0
+                for i in range(len(p)):
+                    real_loss2 += self.criterion["mse"](
+                        p[i][-1], p[i][-1].new_ones(p[i][-1].size()))
+                    fake_loss2 += self.criterion["mse"](
+                        p_[i][-1], p_[i][-1].new_zeros(p_[i][-1].size()))
+                real_loss2 /= (i + 1)
+                fake_loss2 /= (i + 1)
+                dis_loss2 = real_loss2 + fake_loss2
+
         # add to total eval loss
         self.total_eval_loss["eval/adversarial_loss"] += adv_loss.item()
         #self.total_eval_loss["eval/spectral_convergence_loss"] += sc_loss.item()
@@ -413,6 +537,10 @@ class MSMelGANTrainer(Trainer):
         self.total_eval_loss["eval/real_loss"] += real_loss.item()
         self.total_eval_loss["eval/fake_loss"] += fake_loss.item()
         self.total_eval_loss["eval/discriminator_loss"] += dis_loss.item()
+        if self.config.get('use_2nd_D'):
+            self.total_eval_loss["eval/real_loss2"] += real_loss2.item()
+            self.total_eval_loss["eval/fake_loss2"] += fake_loss2.item()
+            self.total_eval_loss["eval/discriminator_loss2"] += dis_loss2.item()
 
     def _eval_epoch(self):
         """Evaluate model one epoch."""
