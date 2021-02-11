@@ -7,8 +7,8 @@
 . ./path.sh || exit 1;
 
 # basic settings
-stage=3       # stage to start
-stop_stage=3 # stage to stop
+stage=-1       # stage to start
+stop_stage=100 # stage to stop
 verbose=1      # verbosity level (lower is less info)
 n_gpus=1       # number of gpus in training
 n_jobs=16      # number of parallel jobs in feature extraction
@@ -16,8 +16,8 @@ n_jobs=16      # number of parallel jobs in feature extraction
 #TODO
 # NOTE(kan-bayashi): renamed to conf to avoid conflict in parse_options.sh
 #conf=conf/parallel_wavegan.v1.yaml
-conf=conf/multi_band_melgan.v2.yaml
-#conf=conf/ms_melgan.v1.yaml
+#conf=conf/multi_band_melgan.v2.yaml
+conf=conf/ms_melgan.v2.yaml
 
 # speaker setting
 spks="all" # all or you can choose speakers e.g., "p225 p226 p227 ..."
@@ -25,10 +25,10 @@ spks="all" # all or you can choose speakers e.g., "p225 p226 p227 ..."
 # directory path setting
 download_dir=downloads # directory to save database
 #TODO
-#data_dir=data
-#dumpdir=dump           # directory to dump features
-data_dir=data1
-dumpdir=dump1           # directory to dump features
+data_dir=data
+dumpdir=dump           # directory to dump features
+#data_dir=data1
+#dumpdir=dump1           # directory to dump features
 
 #TODO
 # training related setting
@@ -42,7 +42,7 @@ resume=""  # checkpoint path to resume training
 checkpoint="" # checkpoint path to be used for decoding
               # if not provided, the latest one will be used
               # (e.g. <path>/<to>/checkpoint-400000steps.pkl)
-checkpoint="exp/train_nodev_all_vctk_multi_band_melgan.v2/checkpoint-1000000steps.pkl"
+#checkpoint="exp/train_nodev_all_vctk_multi_band_melgan.v2/checkpoint-1000000steps.pkl"
 #checkpoint="exp/train_nodev_all_vctk_ms_melgan_v1/checkpoint-600000steps.pkl"
 
 # shellcheck disable=SC1091
@@ -186,8 +186,8 @@ if [ "${stage}" -le 3 ] && [ "${stop_stage}" -ge 3 ]; then
     outdir="${expdir}/wav/$(basename "${checkpoint}" .pkl)"
     pids=()
     #TODO
-    #for name in "${dev_set}" "${eval_set}"; do
-    for name in "${train_set}" "${dev_set}" "${eval_set}"; do
+    for name in "${dev_set}" "${eval_set}"; do
+    #for name in "${train_set}" "${dev_set}" "${eval_set}"; do
     (
         [ ! -e "${outdir}/${name}" ] && mkdir -p "${outdir}/${name}"
         [ "${n_gpus}" -gt 1 ] && n_gpus=1

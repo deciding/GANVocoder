@@ -9,6 +9,30 @@
 import torch
 
 
+class CausalConv1dNoPad(torch.nn.Module):
+    """CausalConv1d module with customized initialization."""
+
+    def __init__(self, in_channels, out_channels, kernel_size,
+                 dilation=1, bias=True):
+        """Initialize CausalConv1d module."""
+        super(CausalConv1d, self).__init__()
+        #self.pad = getattr(torch.nn, pad)((kernel_size - 1) * dilation, **pad_params)
+        self.conv = torch.nn.Conv1d(in_channels, out_channels, kernel_size,
+                                    dilation=dilation, bias=bias)
+
+    def forward(self, x):
+        """Calculate forward propagation.
+
+        Args:
+            x (Tensor): Input tensor (B, in_channels, T).
+
+        Returns:
+            Tensor: Output tensor (B, out_channels, T).
+
+        """
+        #return self.conv(self.pad(x))[:, :, :x.size(2)]
+        return self.conv(x)[:, :, :x.size(2)]
+
 class CausalConv1d(torch.nn.Module):
     """CausalConv1d module with customized initialization."""
 

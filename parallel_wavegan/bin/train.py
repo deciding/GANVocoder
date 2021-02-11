@@ -857,8 +857,9 @@ def main():
         "discriminator": discriminator_class(
             **config["discriminator_params"]).to(device),
     }
-    model["discriminator2"] = discriminator_class2(
-            **config["discriminator_params2"]).to(device)
+    if config.get('use_2nd_D'):
+        model["discriminator2"] = discriminator_class2(
+                **config["discriminator_params2"]).to(device)
     criterion = {
         #"stft": MultiResolutionSTFTLoss(
         "stft": MultiResolutionSTFTLoss2(

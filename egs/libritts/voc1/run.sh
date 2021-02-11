@@ -7,14 +7,15 @@
 . ./path.sh || exit 1;
 
 # basic settings
-stage=-1       # stage to start
-stop_stage=100 # stage to stop
+stage=2       # stage to start
+stop_stage=2 # stage to stop
 verbose=1      # verbosity level (lower is less info)
 n_gpus=1       # number of gpus in training
 n_jobs=128     # number of parallel jobs in feature extraction
 
 # NOTE(kan-bayashi): renamed to conf to avoid conflict in parse_options.sh
-conf=conf/parallel_wavegan.v1.yaml
+#conf=conf/parallel_wavegan.v1.yaml
+conf=conf/ms_melgan.v2.yaml
 
 # speaker setting
 part="clean" # "clean" or "all"

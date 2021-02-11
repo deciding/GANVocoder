@@ -14,9 +14,9 @@ import torch.nn.functional as F
 from parallel_wavegan.layers import CausalConv1d
 from parallel_wavegan.layers import CausalConvTranspose1d
 from parallel_wavegan.layers import ResidualStack
-from parallel_wavegan.layers import ResidualSEStack
+from parallel_wavegan.layers import ResidualAdvancedStack
 
-class MelGANSEGenerator(torch.nn.Module):
+class MelGANAdvancedGenerator(torch.nn.Module):
     """MelGAN generator module."""
 
     def __init__(self,
@@ -35,6 +35,11 @@ class MelGANSEGenerator(torch.nn.Module):
                  use_final_nonlinear_activation=True,
                  use_weight_norm=True,
                  use_causal_conv=False,
+                 use_senet=False,
+                 use_1x1skip=True,
+                 use_multi_receptive_fusion=False,
+                 mrf_kernels=[3, 7, 11, 13],
+                 mrf_inner_dilations=[1, 3, 5],
                  ):
         """Initialize MelGANGenerator module.
 
@@ -57,13 +62,15 @@ class MelGANSEGenerator(torch.nn.Module):
             use_causal_conv (bool): Whether to use causal convolution.
 
         """
-        super(MelGANSEGenerator, self).__init__()
+        super(MelGANAdvancedGenerator, self).__init__()
 
         # check hyper parameters is valid
         assert channels >= np.prod(upsample_scales)
         assert channels % (2 ** len(upsample_scales)) == 0
+        assert stacks == len(mrf_kernels)
         if not use_causal_conv:
             assert (kernel_size - 1) % 2 == 0, "Not support even number kernel size."
+        self.use_multi_receptive_fusion = use_multi_receptive_fusion
 
         # add initial layer
         layers = []
@@ -106,18 +113,24 @@ class MelGANSEGenerator(torch.nn.Module):
 
             # add residual stack
             for j in range(stacks):
+                if use_multi_receptive_fusion:
+                    stack_kernel_size = mrf_kernels[j]
+                    dilation = mrf_inner_dilations
+                else:
+                    dilation = stack_kernel_size ** j
                 layers += [
-                    #ResidualStack(
-                    ResidualSEStack(
+                    ResidualAdvancedStack(
                         kernel_size=stack_kernel_size,
                         channels=channels // (2 ** (i + 1)),
-                        dilation=stack_kernel_size ** j,
+                        dilation=dilation,
                         bias=bias,
                         nonlinear_activation=nonlinear_activation,
                         nonlinear_activation_params=nonlinear_activation_params,
                         pad=pad,
                         pad_params=pad_params,
                         use_causal_conv=use_causal_conv,
+                        use_senet = use_senet,
+                        use_1x1skip = use_1x1skip,
                     )
                 ]
 
@@ -641,8 +654,9 @@ class MelGANPeriodDiscriminator(torch.nn.Module):
             List: List of output tensors of each layer.
 
         """
-        assert (c is None)!=self.use_cond
-        assert c.shape[1]==self.dim_spk
+        #assert (c is None)!=self.use_cond
+        if c is not None:
+            assert c.shape[1]==self.dim_spk
         b, ch, t = x.shape
         if t % self.period != 0: # pad first
             n_pad = self.period - (t % self.period)
@@ -776,8 +790,9 @@ class MelGANCondDiscriminator(torch.nn.Module):
             List: List of output tensors of each layer.
 
         """
-        assert (c is None)!=self.use_cond
-        assert c.shape[1]==self.dim_spk
+        #assert (c is None)!=self.use_cond
+        if c is not None:
+            assert c.shape[1]==self.dim_spk
         outs = []
         ##TODO:delete
         #if self.use_cond:
@@ -1018,7 +1033,7 @@ class MelGANMultiScaleCondDiscriminator(torch.nn.Module):
             List: List of list of each discriminator outputs, which consists of each layer output tensors.
 
         """
-        assert (spk_idx is None)!=self.use_cond
+        #assert (spk_idx is None)!=self.use_cond
         #assert spk_idx.shape[1]==self.num_spk
         outs = []
         #TODO:fix
@@ -1162,7 +1177,7 @@ class MelGANMultiPeriodCondDiscriminator(torch.nn.Module):
             List: List of list of each discriminator outputs, which consists of each layer output tensors.
 
         """
-        assert (spk_idx is None)!=self.use_cond
+        #assert (spk_idx is None)!=self.use_cond
         #assert spk_idx.shape[1]==self.num_spk
         outs = []
         #TODO:fix

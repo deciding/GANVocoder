@@ -8,7 +8,7 @@
 import torch
 import torch.nn.functional as F
 
-from parallel_wavegan.layers import CausalConv1d
+from parallel_wavegan.layers import CausalConv1d, CausalConv1dNoPad
 
 
 class ResidualStack(torch.nn.Module):
@@ -94,13 +94,14 @@ class SEBlock(torch.nn.Module):
 
         return x * w + b # Scale and add bias
 
-class ResidualSEStack(torch.nn.Module):
+class ResidualAdvancedStack(torch.nn.Module):
     """Residual stack module introduced in MelGAN."""
 
     def __init__(self,
                  kernel_size=3,
                  channels=32,
                  dilation=1,
+                 #dilation=[1, 3, 5],
                  bias=True,
                  nonlinear_activation="LeakyReLU",
                  nonlinear_activation_params={"negative_slope": 0.2},
@@ -108,6 +109,8 @@ class ResidualSEStack(torch.nn.Module):
                  pad_params={},
                  use_causal_conv=False,
                  reduction=16,
+                 use_senet=False,
+                 use_1x1skip=True,
                  ):
         """Initialize ResidualStack module.
 
@@ -123,30 +126,41 @@ class ResidualSEStack(torch.nn.Module):
             use_causal_conv (bool): Whether to use causal convolution.
 
         """
-        super(ResidualSEStack, self).__init__()
+        super(ResidualAdvancedStack, self).__init__()
+        self.use_senet = use_senet
+        self.use_1x1skip = use_1x1skip
+        use_multi_dilations = isinstance(dilation, list)
+        self.use_multi_dilations = use_multi_dilations
 
-        # defile residual stack part
         if not use_causal_conv:
             assert (kernel_size - 1) % 2 == 0, "Not support even number kernel size."
-            self.stack = torch.nn.Sequential(
-                getattr(torch.nn, nonlinear_activation)(**nonlinear_activation_params),
-                getattr(torch.nn, pad)((kernel_size - 1) // 2 * dilation, **pad_params),
-                torch.nn.Conv1d(channels, channels, kernel_size, dilation=dilation, bias=bias),
-                getattr(torch.nn, nonlinear_activation)(**nonlinear_activation_params),
-                torch.nn.Conv1d(channels, channels, 1, bias=bias),
-            )
+            pad_kernel=(kernel_size-1)//2*dilation
+            conv_type=torch.nn.Conv1d
+        #self.pad = getattr(torch.nn, pad)((kernel_size - 1) * dilation, **pad_params)
         else:
-            self.stack = torch.nn.Sequential(
+            pad_kernel=(kernel_size-1)*dilation
+            conv_type=CausalConv1dNoPad
+        # defile residual stack part
+        stack_layers=[]
+        if use_multi_dilations:
+            dilations=dilation
+        else:
+            dilations=[dilation]
+        for dilation in dilations:
+            stack_layers+=[
                 getattr(torch.nn, nonlinear_activation)(**nonlinear_activation_params),
-                CausalConv1d(channels, channels, kernel_size, dilation=dilation,
-                             bias=bias, pad=pad, pad_params=pad_params),
+                getattr(torch.nn, pad)(pad_kernel, **pad_params),
+                conv_type(channels, channels, kernel_size, dilation=dilation, bias=bias),
                 getattr(torch.nn, nonlinear_activation)(**nonlinear_activation_params),
                 torch.nn.Conv1d(channels, channels, 1, bias=bias),
-            )
+            ]
+        self.stack = torch.nn.Sequential(*stack_layers)
 
         # defile extra layer for skip connection
-        #self.skip_layer = torch.nn.Conv1d(channels, channels, 1, bias=bias)
-        self.se_block = SEBlock(channels, reduction=reduction)
+        if use_1x1skip:
+            self.skip_layer = torch.nn.Conv1d(channels, channels, 1, bias=bias)
+        if use_senet:
+            self.se_block = SEBlock(channels, reduction=reduction)
 
     def forward(self, c):
         """Calculate forward propagation.
@@ -158,5 +172,12 @@ class ResidualSEStack(torch.nn.Module):
             Tensor: Output tensor (B, chennels, T).
 
         """
+        org = c
+        residual = self.stack(c)
+        if self.use_senet:
+            residual = self.se_block(residual)
+        if self.use_1x1skip:
+            org = self.skip_layer(c)
         #return self.stack(c) + self.skip_layer(c)
-        return self.se_block(self.stack(c)) + c
+        #return self.se_block(self.stack(c)) + c
+        return residual + org
