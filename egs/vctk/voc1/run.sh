@@ -17,7 +17,8 @@ n_jobs=16      # number of parallel jobs in feature extraction
 # NOTE(kan-bayashi): renamed to conf to avoid conflict in parse_options.sh
 #conf=conf/parallel_wavegan.v1.yaml
 #conf=conf/multi_band_melgan.v2.yaml
-conf=conf/ms_melgan.v2.yaml
+#conf=conf/ms_melgan.v2.yaml
+conf=conf/dasigan.v2.yaml
 
 # speaker setting
 spks="all" # all or you can choose speakers e.g., "p225 p226 p227 ..."
